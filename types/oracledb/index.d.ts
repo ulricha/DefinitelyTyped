@@ -9,14 +9,34 @@ import * as stream from 'stream';
 import * as events from 'events';
 
 declare namespace oracledb {
-
-	type TRet<T> = T | IPromise<T>;
-	type TFunc<T, R> = (value: T) => TRet<R>;
-
-	interface IPromise<T> {
-		catch<R>(onReject: TFunc<any, R>) : IPromise<R>;
-		then<R>(onResolve?: TFunc<T, R>, onReject?: TFunc<any, R>) : IPromise<R>;
-	}
+  /**
+   * The Error object contains errorNum, message and offset properties.
+   */
+  interface Error {
+    /**
+     * The Oracle error number. This value is undefined for non-Oracle errors and for messages prefixed with NJS or DPI.
+     */
+    errorNum?: number;
+    /**
+     * The text of the error message.
+     * The error may be a standard Oracle message with a prefix like ORA or PLS. Alternatively it may be a node-oracledb specific error prefixed with NJS or DPI.
+     * A single line error message may look like this:
+     * `ORA-01017: invalid username/password; logon denied`
+     *
+     * A multi-line error message may look like this:
+     * ~~~
+     * ORA-06550: line 1, column 7:
+     * PLS-00201: identifier 'TESTPRC' must be declared
+     * ORA-06550: line 1, column 7:
+     * PL/SQL: Statement ignored
+     * ~~~
+     */
+    message: string;
+    /**
+     * The character offset into the SQL text that resulted in the Oracle error. The value may be 0 in non-SQL contexts. This value is undefined for non-Oracle errors and for messages prefixed with NJS or DPI.
+     */
+    offset?: number;
+  }
 
 	interface ILob {
 		chunkSize: number;
@@ -163,7 +183,7 @@ declare namespace oracledb {
 		name: string;
 		/** one of the Node-oracledb Type Constant values. */
 		fetchType?: number;
-		/** one of the Node-oracledb Type Constant values. */
+		/** one of the Oracle Database Type Constant values. */
 		dbType?: number;
 		/** the database byte size. This is only set for DB_TYPE_VARCHAR, DB_TYPE_CHAR and DB_TYPE_RAW column types. */
 		byteSize?: number;
@@ -183,34 +203,49 @@ declare namespace oracledb {
 		metaData?: Array<IMetaData>;
 
 		/**
-		 * Closes a ResultSet. Applications should always call this at the end of fetch or when no more rows are needed.
-		 * @param  {(err:any)=>void} callback Callback called on finish or when some error occurs.
+		 * Closes a ResultSet. Applications should always call this at the end of fetch or when no more rows are needed. It should also be called if no rows are ever going to be fetched from the ResultSet.
+		 * @param  {(error:Error)=>void} callback Callback called on finish or when some error occurs.
 		 * @returns void
 		 * @remarks Applications should always call this at the end of fetch or when no more rows are needed.
 		 */
-		close(callback: (err: any) => void): void;
+		close(callback: (error: Error) => void): void;
 
 		/**
-		 * Closes a ResultSet. Applications should always call this at the end of fetch or when no more rows are needed.
+		 * Closes a ResultSet. Applications should always call this at the end of fetch or when no more rows are needed. It should also be called if no rows are ever going to be fetched from the ResultSet.
 		 * @returns  A void Promise on finish or when some error occurs.
 		 * @remarks Applications should always call this at the end of fetch or when no more rows are needed.
 		 */
-		close(): IPromise<void>;
+		close(): Promise<void>;
 
 		/**
 		 * This call fetches one row of the result set as an object or an array of column values, depending on the value of outFormat.
 		 * At the end of fetching, the ResultSet should be freed by calling close().
-		 * @param  {(err:any,row:Array<any>|Object)=>void} callback Callback called when the row is available or when some error occurs.
+     * Performance of getRow() can be tuned by adjusting the value of oracledb.fetchArraySize or the execute option fetchArraySize.
+		 * @param  {(error:Error,row:Array<any>|Object)=>void} callback Callback called when the row is available or when some error occurs.
 		 * @returns void
 		 */
-		getRow(callback: (err: any, row: Array<any> | Object) => void): void;
+		getRow(callback: (error: Error, row: Array<any> | Object) => void): void;
 
 		/**
 		 * This call fetches one row of the result set as an object or an array of column values, depending on the value of outFormat.
 		 * At the end of fetching, the ResultSet should be freed by calling close().
 		 * @returns Promise when the row is available or when some error occurs.
 		 */
-		getRow(): IPromise<Array<any> | Object>;
+		getRow(): Promise<Array<any> | Object>;
+
+    /**
+     * This call fetches numRows rows of the ResultSet as an object or an array of column values, depending on the value of outFormat.
+     * At the end of fetching, the ResultSet should be freed by calling close().
+     * Different values of numRows may alter the time needed for fetching data from Oracle Database. The value of fetchArraySize has no effect on getRows() performance or internal buffering.
+     */
+    getRows(numRows: number, callback: (error: Error, rows: Array<Array<any> | Object>) => void): void;
+
+    /**
+     * This call fetches numRows rows of the ResultSet as an object or an array of column values, depending on the value of outFormat.
+     * At the end of fetching, the ResultSet should be freed by calling close().
+     * Different values of numRows may alter the time needed for fetching data from Oracle Database. The value of fetchArraySize has no effect on getRows() performance or internal buffering.
+     */
+    getRows(numRows: number): Promise<Array<any> | Object>;
 
 		/**
 		 * This synchronous method converts a ResultSet into a stream.
@@ -220,6 +255,15 @@ declare namespace oracledb {
 		toQueryStream(): stream.Readable;
 	}
 
+  interface ICloseAttributes {
+    /**
+     * For pooled connections, if drop is false, then the connection is returned to the pool for reuse. If drop is true, the connection will be completely dropped from the connection pool, for example:
+     * `await connection.close({drop: true});`
+     * The default is `false`.
+     */
+    drop: boolean
+  }
+
 	/** Emits "_after_close" event */
 	interface IConnection extends events.EventEmitter {
 		/**
@@ -227,6 +271,12 @@ declare namespace oracledb {
 		 * This is a write-only property. Displaying a Connection object will show a value of null for this attribute. See End-to-end Tracing, Mid-tier Authentication, and Auditing.
 		 */
 		action: string;
+    /**
+     * Sets the maximum number of milliseconds that each underlying round-trip between node-oracledb and Oracle Database may take. Each node-oracledb method or operation may make zero or more round-trips. The callTimeout value applies to each round-trip individually, not to the sum of all round-trips. Time spent processing in node-oracledb before or after the completion of each round-trip is not counted.
+     * See Database Call Timeouts for more information.
+     * This property was added in node-oracledb 3.0. An exception will occur if node-oracledb is not using Oracle client library version 18.1 or later.
+     */
+    callTimeout: number;
 		/**
 		 * The client identifier for end-to-end application tracing, use with mid-tier authentication, and with Virtual Private Databases.
 		 * This is a write-only property. Displaying a Connection object will show a value of null for this attribute. See End-to-end Tracing, Mid-tier Authentication, and Auditing.
@@ -241,56 +291,153 @@ declare namespace oracledb {
 		 * This readonly property gives a numeric representation of the Oracle database version. For version a.b.c.d.e, this property gives the number: (100000000 * a) + (1000000 * b) + (10000 * c) + (100 * d) + e
 		 */
 		oracleServerVersion: number;
+    /**
+     * This readonly property gives a string representation of the Oracle database version which is useful for display.
+     * Note if you connect to Oracle Database 18, the version will only be accurate if node-oracledb is also using Oracle Database 18 client libraries. Otherwise it will show the base release such as “18.0.0.0.0” instead of “18.3.0.0.0”.
+     * This property was added in node-oracledb 2.2.
+     */
+    oracleServerVersionString: number;
 		/**
 		 * The number of statements to be cached in the statement cache of the connection. The default value is the stmtCacheSize property in effect in the Pool object when the connection is created in the pool.
 		 */
 		stmtCacheSize: number;
+    /**
+     * Applications can set the tag property on pooled connections to indicate the ‘session state’ that a connection has. The tag will be retained when the connection is released to the pool. A subsequent pool.getConnection() can request a connection that has a given tag. It is up to the application to set any desired session state and set connection.tag prior to closing the connection.
+     * The tag property is not used for standalone connections.
+     * When node-oracledb is using Oracle Client libraries 12.2 or later, the tag must be a multi-property tag with name=value pairs like “k1=v1;k2=v2”.
+     * An empty string represents not having a tag set.
+     * See Connection Tagging and Session State.
+     * This property was added in node-oracledb 3.1.
+     * # Getting the tag
+     * After a pool.getConnection() requests a tagged connection:
+     * - When no sessionCallback is in use, then connection.tag will contain the actual tag of the connection.
+     * - When a Node.js sessionCallback function is used, then connection.tag will be set to the value of the connection’s actual tag prior to invoking the callback. The callback can then set connection state and alter connection.tag, as desired, before the connection is returned from pool.getConnection().
+     * - When a PL/SQL sessionCallback procedure is used, then after pool.getConnection() returns, connection.tag contains a tag with the same property values as the tag that was requested. The properties may be in a different order. If matchAnyTag is true, then connection.tag may contain other properties in addition to the requested properties. Code after each pool.getConnection() call mirroring the PL/SQL code may be needed so connection.tag can be set to a value representing the session state changed in the PL/SQL procedure.
+     * # Setting the tag
+     * A tag can be set anytime prior to closing the connection. If a Node.js sessionCallback function is being used, the best practice recommendation is to set the tag in the callback function.
+     * To clear a connection’s tag, set `connection.tag = ""`.
+     */
+    tag: string;
 
 		/**
 		 * This call stops the currently running operation on the connection.
 		 * If there is no operation in progress or the operation has completed by the time the break is issued, the break() is effectively a no-op.
 		 * If the running asynchronous operation is interrupted, its callback will return an error.
+     * In network configurations that drop (or in-line) out-of-band breaks, break() may hang unless you have DISABLE_OOB=ON in a sqlnet.ora file, see Optional Client Configuration Files.
+     * If you use use break() with DRCP connections, it is currently recommended to drop the connection when releasing it back to the pool: await connection.close({drop: true}). See Oracle bug 29116892.
 		 * @param	{(err: any) => void} callback Callback on break done.
 		 */
-		break(callback: (err: any) => void): void;
+		break(callback: (error: Error) => void): void;
 
 		/**
 		 * This call stops the currently running operation on the connection.
 		 * If there is no operation in progress or the operation has completed by the time the break is issued, the break() is effectively a no-op.
 		 * If the running asynchronous operation is interrupted, its callback will return an error.
+     * In network configurations that drop (or in-line) out-of-band breaks, break() may hang unless you have DISABLE_OOB=ON in a sqlnet.ora file, see Optional Client Configuration Files.
+     * If you use use break() with DRCP connections, it is currently recommended to drop the connection when releasing it back to the pool: await connection.close({drop: true}). See Oracle bug 29116892.
 		 * @returns	A void promise when break is done.
 		 */
-		break(): IPromise<void>;
+		break(): Promise<void>;
+
+    /**
+     * Changes the password of the specified user.
+     * Only users with the ALTER USER privilege can change passwords of other users.
+     * See Changing Passwords and Connecting with an Expired Password.
+     * This method was added in node-oracledb 2.2.
+     * @param user The name of the user whose password is to be changed.
+     * @param oldPassword The current password of the currently connected user. If changePassword() is being used by a DBA to change the password of another user, the value of oldPassword is ignored and can be an empty string.
+     * @param newPassword The new password of the user whose password is to be changed.
+     * @param callback Callback on password change done.
+     */
+    changePassword(user: string, oldPassword: string, newPassword: string, callback: (error: Error) => void): void;
+
+    /**
+     * Changes the password of the specified user.
+     * Only users with the ALTER USER privilege can change passwords of other users.
+     * See Changing Passwords and Connecting with an Expired Password.
+     * This method was added in node-oracledb 2.2.
+     * @param user The name of the user whose password is to be changed.
+     * @param oldPassword The current password of the currently connected user. If changePassword() is being used by a DBA to change the password of another user, the value of oldPassword is ignored and can be an empty string.
+     * @param newPassword The new password of the user whose password is to be changed.
+     * @returns A void promise when password change is done.
+     */
+    changePassword(user: string, oldPassword: string, newPassword: string): Promise<void>;
 
 		/**
-		 * Releases a connection. If the connection was obtained from the pool, the connection is returned to the pool and is available for reuse.
-		 * Note: calling close() when connections are no longer required is strongly encouraged. Releasing helps avoid resource leakage and can improve system efficiency.
-		 * When a connection is released, any ongoing transaction on the connection is rolled back.
-		 * After releasing a connection to a pool, there is no guarantee a subsequent getConnection() call gets back the same database connection. The application must redo any ALTER SESSION statements on the new connection object, as required.
-		 * @param	{(err: any) => void} callback Callback on close done.
+     * Releases a connection.
+     * Calling close() as soon as a connection is no longer required is strongly encouraged for system efficiency. Calling close() for pooled connections is required to prevent the pool running out of connections.
+     * When a connection is released, any ongoing transaction on the connection is rolled back.
+     * If an error occurs on a pooled connection and that error is known to make the connection unusable, then close() will drop that connection from the connection pool so a future pooled getConnection() call that grows the pool will create a new, valid connection.
+     * This method was added to node-oracledb 1.9, replacing the equivalent alias connection.release().
+		 * @param	callback Callback on close done.
 		 */
-		close(callback: (err: any) => void): void;
+		close(callback: (error: Error) => void): void;
 
 		/**
-		 * Releases a connection. If the connection was obtained from the pool, the connection is returned to the pool and is available for reuse.
-		 * Note: calling close() when connections are no longer required is strongly encouraged. Releasing helps avoid resource leakage and can improve system efficiency.
-		 * When a connection is released, any ongoing transaction on the connection is rolled back.
-		 * After releasing a connection to a pool, there is no guarantee a subsequent getConnection() call gets back the same database connection. The application must redo any ALTER SESSION statements on the new connection object, as required.
+     * Releases a connection.
+     * Calling close() as soon as a connection is no longer required is strongly encouraged for system efficiency. Calling close() for pooled connections is required to prevent the pool running out of connections.
+     * When a connection is released, any ongoing transaction on the connection is rolled back.
+     * If an error occurs on a pooled connection and that error is known to make the connection unusable, then close() will drop that connection from the connection pool so a future pooled getConnection() call that grows the pool will create a new, valid connection.
+     * This method was added to node-oracledb 1.9, replacing the equivalent alias connection.release().
 		 * @returns	A void Promise on close done.
 		 */
-		close(): IPromise<void>;
+		close(): Promise<void>;
 
 		/**
-		 * Send a commit requisition to the database.
-		 * @param	{(err: any) => void} callback Callback on commit done.
+     * Releases a connection.
+     * Calling close() as soon as a connection is no longer required is strongly encouraged for system efficiency. Calling close() for pooled connections is required to prevent the pool running out of connections.
+     * When a connection is released, any ongoing transaction on the connection is rolled back.
+     * If an error occurs on a pooled connection and that error is known to make the connection unusable, then close() will drop that connection from the connection pool so a future pooled getConnection() call that grows the pool will create a new, valid connection.
+     * This method was added to node-oracledb 1.9, replacing the equivalent alias connection.release().
+		 * @param	callback Callback on close done.
+		 */
+		close(options: ICloseAttributes, callback: (error: Error) => void): void;
+
+		/**
+     * Releases a connection.
+     * Calling close() as soon as a connection is no longer required is strongly encouraged for system efficiency. Calling close() for pooled connections is required to prevent the pool running out of connections.
+     * When a connection is released, any ongoing transaction on the connection is rolled back.
+     * If an error occurs on a pooled connection and that error is known to make the connection unusable, then close() will drop that connection from the connection pool so a future pooled getConnection() call that grows the pool will create a new, valid connection.
+     * This method was added to node-oracledb 1.9, replacing the equivalent alias connection.release().
+		 * @returns	A void Promise on close done.
+		 */
+		close(options: ICloseAttributes): Promise<void>;
+
+		/**
+     * This call commits the current transaction in progress on the connection.
+		 * @param	callback Callback on commit done.
 		 */
 		commit(callback: (err: any) => void): void;
 
 		/**
-		 * Send a commit requisition to the database.
+     * This call commits the current transaction in progress on the connection.
 		 * @returns	A void Promise on commit done.
 		 */
-		commit(): IPromise<void>;
+		commit(): Promise<void>;
+
+    /**
+     * Creates a Lob as an Oracle temporary LOB. The LOB is initially empty. Data can be streamed to the LOB, which can then be passed into PL/SQL blocks, or inserted into the database.
+     * When no longer required, Lobs created with createLob() should be closed with lob.close() because Oracle Database resources are held open if temporary LOBs are not closed.
+     * Open temporary LOB usage can be monitored using the view V$TEMPORARY_LOBS.
+     * LOBs created with createLob() can be bound for IN, IN OUT and OUT binds.
+     * See Working with CLOB and BLOB Data and LOB Bind Parameters for more information.
+     *
+     * @param typ One of the constants oracledb.CLOB or oracledb.BLOB.
+     * @param callback
+     */
+    createLob(typ: number, callback: (error: Error, lob: Lob) => void): void;
+
+    /**
+     * Creates a Lob as an Oracle temporary LOB. The LOB is initially empty. Data can be streamed to the LOB, which can then be passed into PL/SQL blocks, or inserted into the database.
+     * When no longer required, Lobs created with createLob() should be closed with lob.close() because Oracle Database resources are held open if temporary LOBs are not closed.
+     * Open temporary LOB usage can be monitored using the view V$TEMPORARY_LOBS.
+     * LOBs created with createLob() can be bound for IN, IN OUT and OUT binds.
+     * See Working with CLOB and BLOB Data and LOB Bind Parameters for more information.
+     *
+     * @param typ One of the constants oracledb.CLOB or oracledb.BLOB.
+     * @returns A Promise containing a Lob.
+     */
+    createLob(typ: number): Promise<Lob>;
 
 		/**
 		 * This call executes a SQL or PL/SQL statement. See SQL Execution for examples.
@@ -350,7 +497,7 @@ declare namespace oracledb {
 		 */
 		execute(sql: string,
 			bindParams?: Object | Array<any>,
-			options?: IExecuteOptions): IPromise<IExecuteReturn>;
+			options?: IExecuteOptions): Promise<IExecuteReturn>;
 
 		/**
 		 * This function provides query streaming support. The parameters are the same as execute() except a callback is not used. Instead this function returns a stream used to fetch data.
@@ -377,7 +524,7 @@ declare namespace oracledb {
 		 * An alias for Connection.close().
 		 * @returns	A void Promise on close done.
 		 */
-		release(): IPromise<void>;
+		release(): Promise<void>;
 
 		/**
 		 * Send a rollback requisition to database.
@@ -389,7 +536,7 @@ declare namespace oracledb {
 		 * Send a rollback requisition to database.
 		 * @returns	A void Promise on rollback done.
 		 */
-		rollback(): IPromise<void>;
+		rollback(): Promise<void>;
 	}
 
 	/** Emits "_after_close" event */
@@ -446,7 +593,7 @@ declare namespace oracledb {
 		 * Finalizes the connection pool.
 		 * @returns Promise to when the close finishes.
 		 */
-		close(): IPromise<void>;
+		close(): Promise<void>;
 
 		/**
 		 * This method obtains a connection from the connection pool.
@@ -465,7 +612,7 @@ declare namespace oracledb {
 		 * @see {@link https://jsao.io/2015/03/making-a-wrapper-module-for-the-node-js-driver-for-oracle-database/}
 		 * @see {@link https://github.com/OraOpenSource/orawrap}
 		 */
-		getConnection(): IPromise<IConnection>;
+		getConnection(): Promise<IConnection>;
 
 		/**
 		 * An alias for IConnectionPool.close().
@@ -478,7 +625,7 @@ declare namespace oracledb {
 		 * An alias for IConnectionPool.close().
 		 * @returns Promise to when the close finishes.
 		 */
-		terminate(): IPromise<void>;
+		terminate(): Promise<void>;
 	}
 
 	const DEFAULT: number;
@@ -626,7 +773,7 @@ declare namespace oracledb {
 	 * @param  {IPoolAttributes} poolAttributes Parameters to stablish the connection pool.
 	 * @returns Promise {(connection:IConnectionPool)=>any} Promise with the connection pool.
 	 */
-	function createPool(poolAttributes: IPoolAttributes): IPromise< IConnectionPool >;
+	function createPool(poolAttributes: IPoolAttributes): Promise< IConnectionPool >;
 
 	/**
 	 * Retrieves a connection pool from cache. If it does not exists, an error will be thrown.
@@ -662,21 +809,21 @@ declare namespace oracledb {
 	 * Creates a connection with the database. The pool name will be "default".
 	 * @returns  {(connection:IConnection)=>any} Promise with the connection.
 	 */
-	function getConnection(): IPromise< IConnection >;
+	function getConnection(): Promise< IConnection >;
 
 	/**
 	 * Creates a connection with the database.
 	 * @param  {string} poolAlias Poll from which the connection should be retrieved.
 	 * @returns  {(connection:IConnection)=>any} Promise with the connection.
 	 */
-	function getConnection(poolAlias: string): IPromise< IConnection >;
+	function getConnection(poolAlias: string): Promise< IConnection >;
 
 	/**
 	 * Creates a connection with the database.
 	 * @param  {IConnectionAttributes} connectionAttributes Parameters to stablish the connection.
 	 * @returns  {(connection:IConnection)=>any} Promise with the connection.
 	 */
-	function getConnection(connectionAttributes: IConnectionAttributes): IPromise< IConnection >;
+	function getConnection(connectionAttributes: IConnectionAttributes): Promise< IConnection >;
 }
 
 export = oracledb;
